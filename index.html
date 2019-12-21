@@ -1,0 +1,641 @@
+<html lang="en"><head>
+		<title>WebGL deferred skin rendering [Lukas]</title>
+
+		<meta charset="utf-8">
+		<meta name="description" content="Physically-based rendering of skin material using GGX BRDF and filmic tonemapping.">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<meta name="apple-mobile-web-app-capable" content="yes">
+		<meta name="apple-mobile-web-app-status-bar-style" content="black">
+		<style>
+			body {
+				color:#fff;
+				background:#000;
+				padding:0;
+				margin:0;
+				font-weight: bold;
+				font-family:Monospace;
+				font-size:13px;
+			}
+
+			a {	color: #ffffff;	}
+
+			#info {
+				position: absolute;
+				top: 0px; width: 100%;
+				color: rgba(255,255,255,0.5);
+				padding: 5px 0px;
+				text-align:center;
+				z-index:1000;
+			}
+
+			#subinfo {
+				color: #fff;
+			}
+
+			#oldie {
+				background:rgb(200,100,0) !important;
+				color:#fff;
+			}
+
+			#loading { background: #0af; color: white; padding: 0.25em 1em; position: absolute; right:0px; top: 0px; z-index: 200; }
+
+			#stats { position: absolute; bottom: 5px; left: 5px; }
+			#stats #fps { background: transparent !important }
+			#stats #fps #fpsText { color: #aaa !important }
+			#stats #fps #fpsGraph { display: none }
+		</style>
+	</head>
+
+	<body>
+		<div id="loading" style="display: none;">Loading ...</div>
+
+		<div id="info">
+			<span id="subinfo">Skin rendering by <a href="https://alteredqualia.com/" target="_blank">AlteredQualia</a></span> (physically-based rendering
+			using GGX BRDF and filmic tonemapping,
+			head model by <a href="https://www.artstation.com/artist/kybel" target="_blank">Lukáš Hajka</a>) -
+			check <a href="https://alteredqualia.com/xg/examples/deferred_skin_paint.html">alternative</a>
+			<a href="https://alteredqualia.com/xg/examples/deferred_skin_eyes.html">versions</a>
+		</div>
+
+		<script src="js/xg.min.642.js"></script>
+		<script src="js/libs/stats.min.js"></script>
+
+		<script id="vertexShaderHemi" type="x-shader/x-vertex">
+
+			varying vec3 worldPosition;
+
+			void main() {
+
+				vec4 mPosition = modelMatrix * vec4( position, 1.0 );
+				vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+
+				gl_Position = projectionMatrix * mvPosition;
+				worldPosition = mPosition.xyz;
+
+			}
+
+		</script>
+
+		<script id="fragmentShaderHemi" type="x-shader/x-fragment">
+
+			uniform vec3 topColor;
+			uniform vec3 bottomColor;
+			uniform float offset;
+			uniform float exponent;
+			uniform float brightness;
+
+			varying vec3 worldPosition;
+
+			void main() {
+
+				float h = normalize( worldPosition + offset ).y;
+				mgl_FragColor = vec4( mix( bottomColor, topColor, max( pow( h, exponent ), 0.0 ) ), 1.0 );
+
+				#ifdef USE_DEFERRED
+
+					mgl_FragColor.rgb = pow( mgl_FragColor.rgb, vec3( 2.2 ) );
+					mgl_FragColor.rgb /= brightness;
+
+				#endif
+
+			}
+
+		</script>
+
+		<script>
+
+			var hasWebGL1 = Detector.webgl;
+			var hasWebGL2 = Detector.webgl2;
+
+			if ( ! ( hasWebGL1 || hasWebGL2 ) ) Detector.addGetWebGLMessage();
+
+			var backend = hasWebGL2 ? "webgl2" : "webgl1";
+
+			// ----------------------------------------
+			// Chrome 75 issues temporary workaround
+
+			backend = "webgl1";
+
+			// ----------------------------------------
+
+			var isMobile = Detector.isMobile;
+			//isMobile = true;
+
+			//
+
+			var BRIGHTNESS = 1.5;
+
+			var MARGIN = 0;
+			var SCALE = 0.7;
+
+			var WIDTH = window.innerWidth;
+			var HEIGHT = window.innerHeight - 2 * MARGIN;
+
+			var statsEnabled = true;
+
+			//
+
+			var useDeferred = true;
+			if ( ! Detector.deferredCapable || isMobile ) useDeferred = false;
+
+			//
+
+			var useKeyLight = true;
+			var useMultiLight = true;
+			var useHemiLight = true;
+
+			//
+
+			var container, stats, loader;
+
+			var camera, scene, renderer;
+
+			var mesh;
+
+			var directionalLight, hemiLight;
+
+			var mouseX = 0;
+			var mouseY = 0;
+
+			var targetX = 0, targetY = 0;
+
+			var windowHalfX = window.innerWidth / 2;
+			var windowHalfY = window.innerHeight / 2;
+
+			var cameraTarget = new XG.Vector3( 0, 0, 0 );
+
+			//
+
+			var loadingElement = document.getElementById( "loading" );
+
+			var itemCounter = 0;
+			var itemsToLoad = 0;
+
+			//
+
+
+			init();
+			animate();
+
+			function init() {
+
+				container = document.createElement( 'div' );
+				document.body.appendChild( container );
+
+				//
+
+				scene = new XG.Scene();
+
+				camera = new XG.PerspectiveCamera( 18, WIDTH / HEIGHT, 1, 7000 );
+				camera.position.set( 0, 170, 1200 );
+				camera.lookAt( cameraTarget );
+
+				// LIGHTS
+
+				if ( useKeyLight ) {
+
+					directionalLight = new XG.DirectionalLight( 0xffffff, 0.75 );
+					directionalLight.position.set( 1, 1, 1 );
+					scene.add( directionalLight );
+
+					directionalLight.position.multiplyScalar( 500 );
+
+					directionalLight.castShadow = true;
+
+					directionalLight.shadowMapWidth = 1024;
+					directionalLight.shadowMapHeight = 1024;
+
+					directionalLight.shadowCameraNear = 200;
+					directionalLight.shadowCameraFar = 1500;
+
+					var d = 500;
+					directionalLight.shadowCameraLeft = -d;
+					directionalLight.shadowCameraRight = d;
+					directionalLight.shadowCameraTop = d;
+					directionalLight.shadowCameraBottom = -d;
+
+					directionalLight.shadowDarkness = 1;
+
+				}
+
+				if ( useMultiLight ) {
+
+					directionalLight.position.y = -300;
+
+					directionalLight2 = new XG.DirectionalLight( 0xffffff, 0.5 );
+					directionalLight2.position.set( -1, 1, 1 );
+					directionalLight2.position.multiplyScalar( 500 );
+					scene.add( directionalLight2 );
+
+					directionalLight2.castShadow = true;
+
+					directionalLight2.shadowMapWidth = 1024;
+					directionalLight2.shadowMapHeight = 1024;
+
+					directionalLight2.shadowCameraNear = 200;
+					directionalLight2.shadowCameraFar = 1500;
+
+					var d = 500;
+					directionalLight2.shadowCameraLeft = -d;
+					directionalLight2.shadowCameraRight = d;
+					directionalLight2.shadowCameraTop = d;
+					directionalLight2.shadowCameraBottom = -d;
+
+					directionalLight2.shadowDarkness = 1;
+
+					//
+
+					directionalLight3 = new XG.DirectionalLight( 0xffffff, 0.53 );
+					directionalLight3.position.set( 1, -0.5, -1 );
+					directionalLight3.position.multiplyScalar( 1500 );
+					scene.add( directionalLight3 );
+
+					directionalLight3.castShadow = true;
+
+					directionalLight3.shadowMapWidth = 1024;
+					directionalLight3.shadowMapHeight = 1024;
+
+					directionalLight3.shadowCameraNear = 0.1;
+					directionalLight3.shadowCameraFar = 5500;
+
+					var d = 500;
+					directionalLight3.shadowCameraLeft = -d;
+					directionalLight3.shadowCameraRight = d;
+					directionalLight3.shadowCameraTop = d;
+					directionalLight3.shadowCameraBottom = -d;
+
+					directionalLight3.shadowDarkness = 1;
+
+					//
+
+					directionalLight.color.setHSV( 0.06, 0.1, 0.8 );
+					directionalLight2.color.setHSV( 0, 0.1, 1 );
+
+				}
+
+				if ( useHemiLight ) {
+
+					hemiLight = new XG.HemisphereLight( 0xffffff, 0xffffff, 0.5 );
+					hemiLight.color.setHSV( 0.6, 0.75, 1 );
+					hemiLight.groundColor.setHSV( 0.095, 0.5, 1 );
+					hemiLight.position.set( 0, 1000, 0 );
+					scene.add( hemiLight );
+
+					if ( ! useDeferred ) hemiLight.intensity = 0.2;
+
+					addSkyHemi();
+
+				}
+
+				// MODEL
+
+				itemsToLoad = 5;
+
+				loader = new XG.CTMLoader();
+				loader.load( "models/ctm/head/head.ctm", function( geometry ) { createScene( geometry, 150 ) } );
+
+				// RENDERER
+
+				var pars = {
+
+					"antialias"		: true,
+					"dither"		: true,
+					"tonemapping"	: XG.FilmicOperator,
+					"brightness"	: BRIGHTNESS,
+					"clearColor"	: 0x040404,
+					"clearAlpha"	: 1,
+					"alpha"			: false,
+					"width"			: WIDTH,
+					"height"		: HEIGHT,
+					"scale"			: SCALE,
+					"backend"		: backend,
+					"useMultipleRenderTargets" : true
+
+				};
+
+				if ( useDeferred ) {
+
+					renderer = new XG.DeferredRenderer( pars );
+
+				} else {
+
+					pars[ "devicePixelRatio" ] = SCALE;
+					//pars[ "antialias" ] = false;
+
+					renderer = new XG.ForwardRenderer( pars );
+
+				}
+
+				renderer.domElement.style.position = "absolute";
+				renderer.domElement.style.top = MARGIN + "px";
+				renderer.domElement.style.left = "0px";
+
+				renderer.domElement.style.position = "absolute";
+				container.appendChild( renderer.domElement );
+
+				//
+
+				renderer.shadowMapEnabled = true;
+				renderer.shadowMapUseDepthTextures = true;
+				renderer.shadowMapCullFace = XG.CullFaceNone;
+
+				renderer.shadowMapSlopeDepthBias = true;
+				renderer.shadowMapSlopeScale = 2;
+
+				renderer.shadowMapDepthTextureBias = 0.01;
+
+				//renderer.shadowMapDebug = true;
+
+				// POST-EFFECTS
+
+				if ( useDeferred ) {
+
+					renderer.ssaoEnabled = true;
+					renderer.bloomEnabled = true;
+
+					renderer.bloomThreshold = 2.0;
+
+					renderer.dofEnabled = true;
+					renderer.dofAutofocus = true;
+					renderer.dofFancy = true;
+					renderer.dofLensFstop = 1.4;
+					renderer.dofLensBlurScale = 4;
+
+					var fovRad = XG.Math.degToRad( camera.fov );
+					renderer.dofLensFocalLength =  XG.Math.fovToFocalLength( fovRad, 24 );
+
+					var effectLens = new XG.ShaderPass( XG.ChromaticAberrationShader );
+					effectLens.material.uniforms.amount.value = 0.003;
+
+					renderer.addEffect( effectLens );
+
+				} else {
+
+					scene.fog = new XG.LinearFog( 0x222222, 1000, 2000 );
+
+				}
+
+				// STATS
+
+				if ( statsEnabled ) {
+
+					stats = new Stats();
+					container.appendChild( stats.domElement );
+
+				}
+
+				// EVENTS
+
+				document.addEventListener( 'mousemove', onDocumentMouseMove, false );
+				document.addEventListener( 'touchmove', onTouchMove, { passive: false } );
+				window.addEventListener( 'resize', onWindowResize, false );
+
+			}
+
+			function loadCallback () {
+
+				itemCounter += 1;
+
+				if ( itemCounter >= itemsToLoad ) {
+
+					loadingElement.style.display = "none";
+
+				}
+
+			}
+
+			function createScene( geometry, scale ) {
+
+				loadCallback();
+
+				var diffuseMap = XG.ImageUtils.loadTexture( "models/ctm/head/diffuse2k2.jpg", loadCallback );
+				diffuseMap.flipY = false;
+				diffuseMap.anisotropy = 4;
+
+				var bumpMap = XG.ImageUtils.loadTexture( "models/ctm/head/displacement1k.jpg", loadCallback );
+				bumpMap.flipY = false;
+				bumpMap.anisotropy = 4;
+
+				var glossMap = XG.ImageUtils.loadTexture( "models/ctm/head/gloss2k.jpg", loadCallback );
+				glossMap.flipY = false;
+				glossMap.anisotropy = 4;
+
+				var eyeMap = XG.ImageUtils.loadTexture( "models/ctm/head/eye1k_blue.jpg", loadCallback );
+				eyeMap.flipY = false;
+				eyeMap.anisotropy = 4;
+
+				// HEAD
+
+				var skinMaterial = new XG.PhongMaterial( {
+
+					"color"		: 0xfff4ef,
+					"specular"	: 0x2b2b2b,
+					"shininess"	: 0.035,
+					"map"		: diffuseMap,
+					"glossMap"	: glossMap,
+					"bumpMap"	: bumpMap,
+					"bumpScale"	: 10,
+					"wrapAround": true
+
+				} );
+
+				skinMaterial.wrapRGB.set( 0.75, 0.5, 0.5 );
+
+				mesh = new XG.Mesh( geometry, skinMaterial );
+
+				mesh.position.y = 30;
+				mesh.scale.multiplyScalar( scale );
+
+				mesh.castShadow = true;
+				mesh.receiveShadow = true;
+
+				scene.add( mesh );
+
+				// EYES
+
+				var eyeGeo = new XG.SphereGeometry( 0.199, 32, 16 );
+				var corneaGeo = new XG.SphereGeometry( 0.185 * 0.8, 32, 16 );
+
+				var eyeMaterial = new XG.PhongMaterial( {
+
+					"color"		: 0xffffff,
+					"specular"	: 0x2b2b2b,
+					"shininess"	: 0.2,
+					"map"		: eyeMap,
+					"glossMap"	: eyeMap,
+					"bumpMap"	: eyeMap,
+					"bumpScale"	: 0.5,
+					"wrapAround": true
+
+				} );
+
+				var corneaMaterial = new XG.PhongMaterial( {
+
+					"color"			: 0x000000,
+					"specular"		: 0x2b2b2b,
+					"shininess"		: 1024,
+					"opacity"		: 0.925,
+					"transparent" 	: true,
+					"blending"		: XG.AdditiveBlending
+
+				} );
+
+				// LEFT EYE
+
+				var leftGyro = new XG.Gyroscope();
+				//leftGyro.position.set( 0.32, 0.625, 0.765 );
+				leftGyro.position.set( 0.3207, 0.6169, 0.7379 );
+
+				var leftEye = new XG.Mesh( eyeGeo, eyeMaterial );
+				leftEye.rotation.set( 1.65, 0, -0.1 );
+				leftEye.castShadow = true;
+				leftEye.receiveShadow = true;
+
+				var leftCornea = new XG.Mesh( corneaGeo, corneaMaterial );
+				leftCornea.position.set( 0, -0.01, 0 );
+				leftCornea.scale.set( 1, 1.45, 1 );
+				leftCornea.castShadow = false;
+				leftCornea.receiveShadow = true;
+
+				leftEye.add( leftCornea );
+				leftGyro.add( leftEye );
+				mesh.add( leftGyro );
+
+				// RIGHT EYE
+
+				var rightGyro = new XG.Gyroscope();
+				//rightGyro.position.set( -0.44, 0.62, 0.79 );
+				rightGyro.position.set( -0.4355, 0.6131, 0.7733 );
+
+				var rightEye = new XG.Mesh( eyeGeo, eyeMaterial );
+				rightEye.rotation.set( 1.65, 0, 0.05 );
+				rightEye.castShadow = true;
+				rightEye.receiveShadow = true;
+
+				var rightCornea = new XG.Mesh( corneaGeo, corneaMaterial );
+				rightCornea.position.set( 0, -0.01, 0 );
+				rightCornea.scale.set( 1, 1.45, 1 );
+				rightCornea.castShadow = false;
+				rightCornea.receiveShadow = true;
+
+				rightEye.add( rightCornea );
+				rightGyro.add( rightEye );
+				mesh.add( rightGyro );
+
+			}
+
+			function addSkyHemi() {
+
+				var vertexShader = document.getElementById( 'vertexShaderHemi' ).textContent;
+				var fragmentShader = document.getElementById( 'fragmentShaderHemi' ).textContent;
+
+				var uniforms = {
+
+					topColor: 	 { type: "c", value: new XG.Color( 0x0077ff ) },
+					bottomColor: { type: "c", value: new XG.Color( 0xffffff ) },
+					offset:		 { type: "f", value: 2500 },
+					exponent:	 { type: "f", value: 0.6 },
+					brightness:	 { type: "f", value: BRIGHTNESS }
+
+				}
+
+				if ( useHemiLight ) {
+
+					uniforms.topColor.value.copy( hemiLight.color );
+					uniforms.bottomColor.value.copy( hemiLight.groundColor );
+
+					uniforms.topColor.value.adjustHSV( 0, -0.5, -0.5 );
+					uniforms.bottomColor.value.adjustHSV( 0, -0.125, -0.2 );
+
+				}
+
+				var defines = {};
+				if ( useDeferred ) defines[ "USE_DEFERRED" ] = true;
+
+				var skyMat = new XG.ShaderMaterial( {
+
+					vertexShader	: vertexShader,
+					fragmentShader	: fragmentShader,
+					uniforms		: uniforms,
+					defines			: defines,
+					side			: XG.BackSide
+
+				} );
+
+				var skyGeo = new XG.SphereGeometry( 5000, 32, 15 );
+
+				var sky = new XG.Mesh( skyGeo, skyMat );
+				sky.position.y = 120;
+				sky.renderDepth = 1;
+				scene.add( sky );
+
+			}
+
+			//
+
+			function onWindowResize( event ) {
+
+				WIDTH = window.innerWidth;
+				HEIGHT = window.innerHeight - 2 * MARGIN;
+
+				renderer.setSize( WIDTH, HEIGHT );
+
+				camera.aspect = WIDTH / HEIGHT;
+				camera.updateProjectionMatrix();
+
+				windowHalfX = window.innerWidth / 2;
+				windowHalfY = window.innerHeight / 2;
+
+			}
+
+			function onDocumentMouseMove( event ) {
+
+				mouseX = ( event.clientX - windowHalfX ) * 0.7;
+				mouseY = ( event.clientY - windowHalfY ) * 0.5;
+
+			}
+
+			function onTouchMove( event ) {
+
+				event.preventDefault();
+
+				var touches = event.touches;
+				var touch = touches[ 0 ];
+
+				mouseX = ( touch.clientX - windowHalfX ) * 0.7;
+				mouseY = ( touch.clientY - windowHalfY ) * 0.5;
+
+			}
+
+			//
+
+			function animate() {
+
+				requestAnimationFrame( animate );
+
+				render();
+				if ( statsEnabled ) stats.update();
+
+			}
+
+			function render() {
+
+				targetX = mouseX * .001;
+				targetY = mouseY * .001;
+
+				if ( mesh ) {
+
+					mesh.rotation.y += 0.05 * ( targetX - mesh.rotation.y );
+					mesh.rotation.x += 0.05 * ( targetY - mesh.rotation.x );
+
+				}
+
+				renderer.render( scene, camera );
+
+			}
+
+		</script><div><canvas width="1273" height="1327" style="left: 0px; top: 0px; width: 849px; height: 885px; position: absolute;"></canvas><div id="stats" style="width: 80px; cursor: pointer; opacity: 0.9;"><div id="fps" style="padding: 0px 0px 3px 3px; text-align: left; background-color: rgb(0, 0, 34);"><div id="fpsText" style="color: rgb(0, 255, 255); line-height: 15px; font-family: Helvetica,Arial,sans-serif; font-size: 9px; font-weight: bold;">35 FPS (7-35)</div><div id="fpsGraph" style="width: 74px; height: 30px; position: relative; background-color: rgb(0, 255, 255);"><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 30px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 27.9px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 21px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 20.1px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 21px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 20.4px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 21.3px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 21px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 22.2px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 21.6px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 22.8px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 21.9px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 22.2px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 21.3px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 23.1px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 26.1px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 22.8px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 22.2px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 20.1px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 20.7px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 19.5px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 20.7px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 20.1px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 19.5px; float: left; background-color: rgb(17, 17, 51);"></span><span style="width: 1px; height: 19.5px; float: left; background-color: rgb(17, 17, 51);"></span></div></div><div id="ms" style="padding: 0px 0px 3px 3px; text-align: left; display: none; background-color: rgb(0, 34, 0);"><div id="msText" style="color: rgb(0, 255, 0); line-height: 15px; font-family: Helvetica,Arial,sans-serif; font-size: 9px; font-weight: bold;">24 MS (6-849)</div><div id="msGraph" style="width: 74px; height: 30px; position: relative; background-color: rgb(0, 255, 0);"><span style="width: 1px; height: 25.2px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.55px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.55px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.5px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.1px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.35px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.8px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.25px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.4px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.25px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 24.75px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 21.75px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.55px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 27px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.55px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 27px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.25px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.4px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 24.75px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 24px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.05px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 27.3px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.1px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 24.3px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 23.85px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.4px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.5px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.1px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 23.25px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 24.3px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 24.6px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.4px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.1px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.85px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 27.15px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.35px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.85px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 24.3px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.8px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.1px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.25px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.55px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 27px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.1px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.8px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.8px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.05px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.65px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.25px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 23.85px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.05px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 23.7px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.1px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.8px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.85px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 27.15px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.55px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.4px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.95px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.85px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.8px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.4px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 25.8px; float: left; background-color: rgb(17, 51, 17);"></span><span style="width: 1px; height: 26.4px; float: left; background-color: rgb(17, 51, 17);"></span></div></div></div></div>
+		<script src="js/libs/rabbit.js" async=""></script>
+	
+
+<div style="top: 5px; right: 5px; position: absolute; z-index: 10000;"><a title="rabbit hole" id="rabbit" href="#surprise"><img style="width:16px;height:16px" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAAsTAAALEwEAmpwYAAAAB3RJTUUH4gscEjc3zV+7OgAAAB1pVFh0Q29tbWVudAAAAAAAQ3JlYXRlZCB3aXRoIEdJTVBkLmUHAAAAoklEQVRYw+2XwQrCMBBE32ihiAfPHv0p+431xwq9KP7AeskpiG1ZaXuYuSQQJlkyu5MNJBAFmT0ObIx9BxARfUT0CYkm+ZZg8wBUa7aQfy/jY9GhUrebG0hl8ZQRuQocwBw0Sf4FOKd8IPGc3oChzE/Ac20J3sA1K2MjSb/quHauav0ItJJetavO4f8jB8Zvlu4ydADuB9wPuArWzBF/TtP4ACgsafHmZ0T+AAAAAElFTkSuQmCC"></a></div></body></html>
